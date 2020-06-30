@@ -81,4 +81,4 @@ class NetworkConf(DBObject):
 
 
 # Registry.DBPOOL = adbapi.ConnectionPool('psycopg2', host="127.0.0.1", user="saboney", password="123", database="honeypot")
-Registry.DBPOOL = adbapi.ConnectionPool('MySQLdb', host="localhost" ,user="avapot",port=13306 , passwd="123", db="honeypot", cp_reconnect=True)
+Registry.DBPOOL = adbapi.ConnectionPool('MySQLdb', host="localhost" ,user="miladpot",port=13306 , passwd="123", db="honeypot", cp_reconnect=True)

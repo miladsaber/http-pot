@@ -11,19 +11,19 @@ from twisted.web.twcgi import *
 from twisted.python import log, filepath, failure
 from twisted.python.compat import networkString, escape, nativeString, intToBytes
 
-from twisted.web import http # AvaRequest
-from twisted.web.http import unquote # AvaRequest
+from twisted.web import http # miladRequest
+from twisted.web.http import unquote # miladRequest
 
 from twisted.web.error import UnsupportedMethod
 
 ##########################################
-from http.channel import AvaHTTPChannel
+from http.channel import MiladHTTPChannel
 from http.models import *
 from http.config import get_server_ip
 from general import *
 import datetime
 from twisted.internet.defer import gatherResults
-import avaReporter
+
 
 supportedMethods = (b'GET', b'HEAD', b'POST')
 
@@ -32,7 +32,7 @@ version = networkString('Apache httpd 2.3.10')
 NOT_DONE_YET = 1
 
 
-class AvaHTTPErrorPage(resource.Resource):
+class miladHTTPErrorPage(resource.Resource):
     """
     L{ErrorPage} is a resource which responds with a particular
     (parameterized) status and a body consisting of HTML containing some
@@ -93,7 +93,7 @@ class AvaHTTPErrorPage(resource.Resource):
         return self
 
 
-class AvaRequest(server.Request):
+class MiladRequest(server.Request):
 
     def process(self):
         """
@@ -168,11 +168,11 @@ class AvaRequest(server.Request):
                          'allowed': ', '.join(
                             [nativeString(x) for x in allowedMethods])
                      })
-                epage = AvaHTTPErrorPage(http.NOT_ALLOWED,
+                epage = miladHTTPErrorPage(http.NOT_ALLOWED,
                                            "Method Not Allowed", s)
                 body = epage.render(self)
             else:
-                epage = AvaHTTPErrorPage(
+                epage = miladHTTPErrorPage(
                     http.NOT_IMPLEMENTED, "Huh?",
                     "I don't know how to treat a %s request." %
                     (escape(self.method.decode("charmap")),))
@@ -182,7 +182,7 @@ class AvaRequest(server.Request):
         if body == NOT_DONE_YET:
             return
         if not isinstance(body, bytes):
-            body = AvaHTTPErrorPage(
+            body = miladHTTPErrorPage(
                 http.INTERNAL_SERVER_ERROR,
                 "Request did not return bytes",
                 "Request: " + util._PRE(reflect.safe_repr(self)) + "<br />" +
@@ -218,54 +218,22 @@ def getTypeAndEncoding(filename, types, encodings, defaultType):
     return type, enc
 
 
-class AvapotHTTPServer(static.File):
-
-    reporter = avaReporter.Reporter()
+class MiladHTTPServer(static.File):
 
     def directoryListing(self):
         return self.childNotFound
 
     def render_HEAD(self, request):
-        data = {
-            "cookie": json.dumps(request.received_cookies),
-            "url_requested": request.path,
-            "method": request.method,
-            "user_agent": request.user_agent or None,
-            "status_code": request.code,
-            "data": self.get_query(request)}
-        attack_obj = {
-            'attack_time': time.time(),
-            'attacker_ip': request.transport.getPeer().host,
-            'interface_ip': request.transport.getHost().host,
-            'type': 'connection',
-            'protocol': 'http',
-            'extra': json.dumps(data)}
-        self.reporter.report(attack_obj)
+        self.cs_attacker(request.transport.getPeer().host, request)
         return self.render_GET(request)
 
     def render_GET(self, request):
         if request.method == "GET":
-            data = {
-                "cookie": json.dumps(request.received_cookies),
-                "url_requested": request.path,
-                "method": request.method,
-                "user_agent": request.user_agent or None,
-                "status_code": request.code,
-                "data": self.get_query(request)
-                }
-            attack_obj = {
-                'attack_time': time.time(),
-                'attacker_ip': request.transport.getPeer().host,
-                'interface_ip': request.transport.getHost().host,
-                'type': 'connection',
-                'protocol': 'http',
-                'extra': json.dumps(data)}
-            self.reporter.report(attack_obj)
-
+            self.cs_attacker(request.transport.getPeer().host, request)
         return static.File.render_GET(self, request)
 
     def render_POST(self, request):
-        """This method approuces when http_mode set as html """
+        """ This method approuces when http_mode set as html """
         if request.method == "POST":
 
             self.headers = request.getAllHeaders()
@@ -276,23 +244,91 @@ class AvapotHTTPServer(static.File):
                          'CONTENT_TYPE': self.headers['content-type'],
                          }
             )
-            data = {
-                "cookie": json.dumps(request.received_cookies),
-                "url_requested": request.path,
-                "method": request.method,
-                "user_agent": request.user_agent or None,
-                "status_code": request.code,
-                "data": self.get_query(request)}
-            attack_obj = {
-                'attack_time': time.time(),
-                'attacker_ip': request.transport.getPeer().host,
-                'interface_ip': request.transport.getHost().host,
-                'type': 'connection',
-                'protocol': 'http',
-                'extra': json.dumps(data)}
-            self.reporter.report(attack_obj)
-
+            self.cs_attacker(request.transport.getPeer().host, request)
             return static.File.render_GET(self, request)
+
+    def cs_attacker(self, ip, request):
+        d = HttpAttacker.find(where=['ip = ?' , ip], limit=1)
+        attacked_time = time.time()
+        d.addCallback(self.check_attacker, ip, request)
+        d.addCallback(self.save, request, attacked_time)
+
+    def check_attacker(self, attacker, ip, request):
+        if attacker:
+            return attacker
+        else:
+            d = self.new_attacker(ip, request)
+            d.addErrback(self.new_user_fail, ip=ip, request=request)
+            return d
+
+    def new_attacker(self, ip, request):
+        attacker = HttpAttacker(ip=ip, count_30=0, count_90=0, count_year=0, count_all=0,
+            last_activity=time.time())
+        attacked_time = time.time()
+        s = attacker.save()
+        return s
+
+    def new_user_fail(attacker, ip, request):
+        attacker = HttpAttacker.find(where=['ip = ?', ip], limit=1)
+        if attacker:
+            return attacker
+        else:
+            #syslog_msg = 'date={date} time={time} MiladPotProtocol={MiladPotProtocol} ip={ip} url_requested={url_requested} method={method}' \
+            #             'Failed to save in db \n' \
+            #    .format(date=datetime.datetime.fromtimestamp(attacked_time).strftime('%Y-%m-%d'),
+            #    time=datetime.datetime.fromtimestamp(attacked_time).strftime('%H:%M:%S'), MiladPotProtocol='http',
+            #    ip=request.transport.getPeer().host, url_requested=request.path, method=request.method)
+            # insertErrSysLog(syslog_msg)
+            return None
+
+    def retrying_attacker(self, attacker, ip, request):
+        "we have had this attacker before!"
+        attacked_time = time.time()
+        self.attacker = attacker
+        d = self.save_in_db(attacker, request, attacked_time)
+        d.addCallback(self.save_in_syslog(attacker, request, attacked_time))
+
+
+    def save(self, attacker, request, attacked_time):
+        if not isinstance(attacker,HttpAttacker):
+            return
+        else:
+            self.save_in_db(attacker, request, attacked_time)
+            self.save_in_syslog(attacker, request, attacked_time)
+
+
+    def save_in_db(self, attacker, request, attacked_time):
+        user_agent = ""
+        try:
+            user_agent = request.user_agent
+        except:
+            user_agent = ""
+        self.http_connection = AttackerConnection(attacker_id=attacker.id, url_requested=request.path,
+            method=request.method, status_code=request.code, cookie=json.dumps(request.received_cookies),
+            user_agent=user_agent, timestamp=attacked_time, data=self.get_query(request))
+        try:
+            self.http_connection.save()
+        except Exception,e:
+            insertSysLog(str(e))
+
+    def save_in_syslog(self, attacker, request, attacked_time):
+        try:
+            user_agent = request.user_agent
+        except:
+            user_agent = None
+        syslog_msg = 'date={date} time={time} MiladPotProtocol={MiladPotProtocol} ip={ip} status_code={status_code}  method={method} ' \
+                     'url_requested={url_requested} cookie={cookie} user_agent={user_agent} data={data}\n' \
+            .format(date=datetime.datetime.fromtimestamp(attacked_time).strftime('%Y-%m-%d'),
+                    time=datetime.datetime.fromtimestamp(attacked_time).strftime('%H:%M:%S'),
+                    miladPotProtocol='http',
+                    ip=request.transport.getPeer().host,
+                    url_requested=request.path,
+                    method=request.method,
+                    status_code=request.code,
+                    cookie=json.dumps(request.received_cookies),
+                    user_agent=user_agent,
+                    data=self.get_query(request)                    )
+        insertSysLog(syslog_msg)
 
     def get_query(self, request):
         query = ""
@@ -316,6 +352,7 @@ class AvapotHTTPServer(static.File):
                         query = "file"
         return query
 
+
     def is_there_file(self, request):
         count = 0
 
@@ -335,7 +372,7 @@ class AvapotHTTPServer(static.File):
                     af.save().addCallback(self.save_file, self.files_posted[i])
 
     def save_file(self, af, _file):
-        out = open("/opt/avapot_core/uploaded_files/http/%d" % af.id, 'wb')
+        out = open("/opt/miladpot_core/uploaded_files/http/%d" % af.id, 'wb')
         out.write(_file.value)
         out.close()
 
@@ -413,7 +450,7 @@ class PHPScript(FilteredScript):
         return FilteredScript.runProcess(self, env, request, qargs)
 
 
-class AvaSite(server.Site):
-    protocol = AvaHTTPChannel
-    requestFactory = AvaRequest
+class MiladSite(server.Site):
+    protocol = MiladHTTPChannel
+    requestFactory = MiladRequest
     displayTracebacks = False

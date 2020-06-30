@@ -28,7 +28,7 @@ def _respondToBadRequestAndDisconnect(transport):
     transport.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
     transport.loseConnection()
 
-class AvaHTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
+class MiladHTTPChannel(basic.LineReceiver, policies.TimeoutMixin):
     """
     A receiver for HTTP requests.
 
